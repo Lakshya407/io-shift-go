@@ -1,0 +1,23 @@
+// Cloudflare Workers configuration for ShiftGo.
+// Local dev (`npm run dev`) uses a local SQLite-backed D1 in .wrangler/state.
+// Before `npm run deploy`, create the database and paste its id below:
+//   npx wrangler d1 create nightshift-db
+// Secrets (never commit): npx wrangler secret put SETUP_TOKEN
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nightshift-cab",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nightshift-db",
+      "database_id": "00000000-0000-4000-8000-000000000000",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  // Every minute: SOS reminder escalation + daily report generation.
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true }
+}

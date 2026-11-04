@@ -1,0 +1,611 @@
+{
+  "name": "ShiftGo Cab \u00b7 Notification Dispatcher",
+  "nodes": [
+    {
+      "id": "79217109-0e44-5477-bc6a-89b354d31d15",
+      "name": "Recovery poll \u00b7 every 30 seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -920,
+        -160
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "disabled": true
+    },
+    {
+      "id": "9014c4ca-0435-5b08-bc26-0e8e11d9e311",
+      "name": "Immediate wake-up",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -920,
+        40
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cab-notification-wakeup",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "responseCode": 202,
+        "options": {}
+      },
+      "webhookId": "76a1a620-30e4-48ed-8494-286ba652574f",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CONFIGURE_CAB_WAKEUP_HEADER_AUTH",
+          "name": "Cab wake-up webhook"
+        }
+      }
+    },
+    {
+      "id": "ad911bd2-82f9-57f8-854e-e7ef8487be65",
+      "name": "Manual dispatch",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -920,
+        240
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "6b6371d4-0c80-5353-9701-4c59c4629f4a",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        20
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Non-secret deployment settings. Never paste credentials here.\nconst baseUrl = 'https://nightshift-cab-care.noblebuddy257.chatgpt.site';\nconst fromEmail = 'cab-alerts@YOUR-COMPANY.example';\nif (!/^https:\\/\\//.test(baseUrl) || /YOUR-CAB-APP/.test(baseUrl)) {\n  throw new Error('Set the HTTPS app URL in Configuration before activating this workflow.');\n}\nreturn [{json: {baseUrl: baseUrl.replace(/\\/$/, ''), fromEmail, limit: 5}}];"
+      }
+    },
+    {
+      "id": "d99180ce-2d68-563b-9783-4699e7b45c5d",
+      "name": "Lease pending jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -440,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.baseUrl + '/api/automation/jobs/claim' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({limit: $json.limit, workerId: 'n8n-' + $execution.id}) }}",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CONFIGURE_CAB_APP_CUSTOM_AUTH",
+          "name": "Cab app automation API"
+        }
+      }
+    },
+    {
+      "id": "28766655-ef5b-59b4-9ec7-2c338eeaf9fb",
+      "name": "Split claimed jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -200,
+        20
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const result = $input.first().json;\nif (!result || !Array.isArray(result.jobs)) {\n  throw new Error('Cab API returned an unexpected claim response; expected {jobs: []}.');\n}\nreturn result.jobs.map(job => ({json: job, pairedItem: {item: 0}}));"
+      }
+    },
+    {
+      "id": "03b0d73a-09e6-5fa2-a81c-58b7f978b3a7",
+      "name": "Loop deliveries",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        40,
+        20
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "56ab53c5-76cb-59df-b871-bbde2d993e20",
+      "name": "Prepare delivery",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        20
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $json;\nconst config = $('Configuration').first().json;\nif (!job.id || !job.leaseToken) throw new Error('Claimed job missing identity or lease token.');\nconst p = job.payload || {};\nlet validationError = '';\nif (!['teams', 'email'].includes(job.channel)) validationError = 'Unsupported notification channel.';\nelse if (typeof p.text !== 'string' || !p.text.trim()) validationError = 'Notification text is missing.';\nelse if (job.channel === 'teams' && (!p.teamId || !p.channelId)) validationError = 'Teams team or channel ID is missing.';\nelse if (job.channel === 'email' && (!Array.isArray(p.to) || p.to.length !== 1 || !/^[^\\s@,;]+@[^\\s@,;]+\\.[^\\s@,;]+$/.test(p.to[0]))) validationError = 'Email jobs require one valid recipient per job.';\nelse if (job.channel === 'email' && (/YOUR-COMPANY/.test(config.fromEmail) || !config.fromEmail.includes('@'))) validationError = 'Configure the workflow From email address.';\nelse if (job.channel === 'email' && (!p.subject || /[\\r\\n]/.test(p.subject))) validationError = 'Email subject is empty or contains a line break.';\nreturn {json: {...job, payload: p, validationError, fromEmail: config.fromEmail}};"
+      }
+    },
+    {
+      "id": "93acdbce-6c4b-5c31-89ed-7b12dc629a10",
+      "name": "Valid job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        520,
+        20
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "89c06426-f539-5da9-a2d0-6d6da6d943ea",
+              "leftValue": "={{ $json.validationError }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "081368b3-b0fd-5f84-a196-9e1e2ab83b06",
+      "name": "Teams channel?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        760,
+        -120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c8c21756-600b-5e95-8ff3-a6d78d74445b",
+              "leftValue": "={{ $json.channel }}",
+              "rightValue": "teams",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "73e2805a-b19d-51ef-a562-8dcb4846d068",
+      "name": "Send Teams alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1020,
+        -240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.payload.teamId) + '/channels/' + encodeURIComponent($json.payload.channelId) + '/messages' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "microsoftTeamsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({body:{contentType:$json.payload.html ? 'html' : 'text',content:$json.payload.html || $json.payload.text},importance:$json.payload.priority === 'high' ? 'high' : 'normal'}) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "microsoftTeamsOAuth2Api": {
+          "id": "CONFIGURE_MICROSOFT_TEAMS_OAUTH2",
+          "name": "Cab admin Microsoft Teams"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "d3b2081a-9779-582a-9ba2-a693787ffc5c",
+      "name": "Send email alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1020,
+        0
+      ],
+      "parameters": {
+        "fromEmail": "={{ $json.fromEmail }}",
+        "toEmail": "={{ $json.payload.to.join(',') }}",
+        "subject": "={{ $json.payload.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.payload.text }}",
+        "html": "={{ $json.payload.html || ('<pre>' + $json.payload.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>') }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "CONFIGURE_CAB_ALERTS_SMTP",
+          "name": "Cab alerts SMTP"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "108a4700-8f70-5256-b876-636474677941",
+      "name": "Teams result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        -240
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $('Prepare delivery').item.json;\nconst response = $json;\nconst body = response.body || {};\nconst ok = response.statusCode === 201 && Boolean(body.id) && !response.error;\nconst reason = response.error?.message || response.error || body.error?.message || `Teams returned HTTP ${response.statusCode || 'unknown'} without a created message ID.`;\nreturn {json: {id: job.id, leaseToken: job.leaseToken, status: ok ? 'sent' : 'failed',\n  providerId: ok ? String(body.id) : null,\n  error: ok ? null : String(reason).slice(0, 600)}};"
+      }
+    },
+    {
+      "id": "e9a45a6c-389d-5ba1-9c42-7f9b0a1f79a0",
+      "name": "Email result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $('Prepare delivery').item.json;\nconst response = $json;\nconst addresses = values => Array.isArray(values) ? values.map(v => String(typeof v === 'string' ? v : v.address || '').toLowerCase()) : [];\nconst accepted = addresses(response.accepted);\nconst rejected = addresses(response.rejected);\nconst ok = !response.error && Boolean(response.messageId) && rejected.length === 0 && job.payload.to.every(a => accepted.includes(a.toLowerCase()));\nconst reason = response.error?.message || response.error || (rejected.length ? 'SMTP rejected the recipient.' : 'SMTP did not confirm acceptance for this recipient.');\nreturn {json: {id: job.id, leaseToken: job.leaseToken, status: ok ? 'sent' : 'failed',\n  providerId: ok ? String(response.messageId) : null,\n  error: ok ? null : String(reason).slice(0, 600)}};"
+      }
+    },
+    {
+      "id": "7cbdafaf-b47e-50fe-ad0d-78793b00de64",
+      "name": "Invalid job result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        260
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {json: {id: $json.id, leaseToken: $json.leaseToken, status: 'failed', providerId: null, error: $json.validationError}};"
+      }
+    },
+    {
+      "id": "05e5c41e-6389-524d-ae98-ab88a7a6d50c",
+      "name": "Record delivery result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration').first().json.baseUrl + '/api/automation/jobs/' + encodeURIComponent($json.id) + '/receipt' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({leaseToken:$json.leaseToken,status:$json.status,providerId:$json.providerId,error:$json.error}) }}",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CONFIGURE_CAB_APP_CUSTOM_AUTH",
+          "name": "Cab app automation API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "3b0e5262-5fc1-5471-8f10-c18a8ac0d8cf",
+      "name": "Setup and delivery semantics",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -700,
+        -540
+      ],
+      "parameters": {
+        "content": "## Configure before publishing\n1. Set app URL and sender in Configuration.\n2. Select Cab API Custom Auth, Teams OAuth2, SMTP, and webhook Header Auth credentials.\n3. Set app N8N_WEBHOOK_URL + N8N_WEBHOOK_SECRET.\n4. Run supervised tests, then publish both workflows.\n\nApp database owns retries. Provider acceptance is not admin acknowledgment. An uncertain provider result can cause a duplicate on retry. See README.md.",
+        "height": 300,
+        "width": 600
+      }
+    },
+    {
+      "id": "67eb341a-eaa7-4aa5-be14-0dddcc9f9788",
+      "name": "Setup status",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -960,
+        -540
+      ],
+      "parameters": {
+        "content": "## Connection setup \u2014 schedules are disabled\nThis copy is for supervised setup in the current n8n Cloud trial.\n\nThe app URL is configured. Bind the app API, webhook, Microsoft Teams and email credentials before testing delivery.\n\nThe original 30-second dispatcher and 1-minute maintenance schedules would start approximately 129,600 executions per 30 days. They are disabled here to prevent accidental consumption of the 1,000-execution trial.\n\nTimed recovery, SOS escalation and scheduled reports are NOT running. Agree an execution strategy and verify all credentials before enabling production schedules.",
+        "height": 365,
+        "width": 580
+      }
+    }
+  ],
+  "connections": {
+    "Recovery poll \u00b7 every 30 seconds": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Immediate wake-up": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual dispatch": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Lease pending jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lease pending jobs": {
+      "main": [
+        [
+          {
+            "node": "Split claimed jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split claimed jobs": {
+      "main": [
+        [
+          {
+            "node": "Loop deliveries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare delivery": {
+      "main": [
+        [
+          {
+            "node": "Valid job?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid job?": {
+      "main": [
+        [
+          {
+            "node": "Teams channel?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invalid job result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Teams channel?": {
+      "main": [
+        [
+          {
+            "node": "Send Teams alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send email alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Teams alert": {
+      "main": [
+        [
+          {
+            "node": "Teams result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send email alert": {
+      "main": [
+        [
+          {
+            "node": "Email result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Teams result": {
+      "main": [
+        [
+          {
+            "node": "Record delivery result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email result": {
+      "main": [
+        [
+          {
+            "node": "Record delivery result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invalid job result": {
+      "main": [
+        [
+          {
+            "node": "Record delivery result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop deliveries": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Prepare delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record delivery result": {
+      "main": [
+        [
+          {
+            "node": "Loop deliveries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "executionTimeout": 120
+  },
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
