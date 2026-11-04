@@ -5,6 +5,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: shiftgo
+  namespace: shiftgo
   labels:
     app.kubernetes.io/name: shiftgo
   annotations:

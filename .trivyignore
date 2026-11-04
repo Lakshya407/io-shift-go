@@ -1,0 +1,6 @@
+# Accepted security findings for Trivy (read automatically by the CI jobs security:trivy-fs and
+# security:trivy-image). Currently none are ignored.
+#
+# Add one ID per line ONLY after review, with the reason, owner and an expiry date:
+#   CVE-2026-12345 exp:2027-03-31  # not reachable: <reason> (reviewed by <name>, <date>)
+#   KSV-0011                        # <reason>

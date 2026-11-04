@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: shiftgo
+  namespace: shiftgo
   labels:
     app.kubernetes.io/name: shiftgo
 spec:
@@ -25,14 +26,15 @@ spec:
         - name: gitlab-registry
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000          # "node" user of the image
-        runAsGroup: 1000
+        runAsUser: 65532         # "nonroot" user of the distroless image
+        runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 20
       containers:
         - name: shiftgo
-          image: shiftgo-cab      # replaced by kustomization.yaml (newName/newTag)
+          image: shiftgo-cab:set-by-kustomize   # replaced by kustomization.yaml (newName/newTag)
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -74,16 +76,27 @@ spec:
               cpu: 100m
               memory: 256Mi
             limits:
+              cpu: "1"
               memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: shiftgo
+  namespace: shiftgo
   labels:
     app.kubernetes.io/name: shiftgo
 spec:

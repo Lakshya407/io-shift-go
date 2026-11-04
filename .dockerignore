@@ -43,3 +43,5 @@ argocd/
 .DS_Store
 Thumbs.db
 npm-debug.log*
+.trivycache/
+.trivyignore

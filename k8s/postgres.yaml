@@ -4,6 +4,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: shiftgo-postgres
+  namespace: shiftgo
   labels:
     app.kubernetes.io/name: shiftgo-postgres
 spec:
@@ -18,6 +19,15 @@ spec:
         app.kubernetes.io/name: shiftgo-postgres
     spec:
       terminationGracePeriodSeconds: 60
+      # Non-root: uid/gid 70 = "postgres" in the alpine image; fsGroup makes the volume writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
           image: postgres:17-alpine
@@ -53,10 +63,27 @@ spec:
               cpu: 100m
               memory: 256Mi
             limits:
+              cpu: "1"
               memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            # Writable paths needed with a read-only root filesystem.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -71,6 +98,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: shiftgo-postgres
+  namespace: shiftgo
   labels:
     app.kubernetes.io/name: shiftgo-postgres
 spec:

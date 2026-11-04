@@ -1,9 +1,11 @@
 # ShiftGo CI/CD: GitLab CI + Argo CD
 
 ```
-git push ─▶ GitLab CI ─┬─ test            typecheck + API tests on SQLite + n8n workflow checks
- (iogitlab)            ├─ test:postgres   same API tests on a throw-away PostgreSQL 17
-                       ├─ build           docker buildx → $CI_REGISTRY_IMAGE:<sha> (+ :latest)      main only
+git push ─▶ GitLab CI ─┬─ test                 typecheck + API tests on SQLite + n8n workflow checks
+ (iogitlab)            ├─ test:postgres        same API tests on a throw-away PostgreSQL 17
+                       ├─ security:trivy-fs    Trivy: npm CVEs, committed secrets, Dockerfile/k8s misconfig
+                       ├─ build                docker buildx → $CI_REGISTRY_IMAGE:<sha> (+ :latest)      main only
+                       ├─ security:trivy-image Trivy: OS + Node.js CVEs in the pushed image             main only
                        ├─ deploy          bumps k8s/kustomization.yaml newTag, commits "[skip ci]"   main only
                        └─ k8s:secrets     (manual) GitLab variables → Secret shiftgo-env in the cluster
                                    │
@@ -91,6 +93,25 @@ GitLab can only mask values of 8+ characters from a limited character set. If it
    ```
 7. Open `https://iocab.shiftgo.infoapps.io`, enter the setup key, and create the admin account.
    Then try **Sign in with Microsoft**.
+
+## Security scanning (Trivy)
+
+| Job | Scans | Fails the pipeline on |
+|---|---|---|
+| `security:trivy-fs` (every branch/MR) | `package-lock.json` CVEs, secrets in the code, misconfigurations in `Dockerfile`, `k8s/`, `argocd/` | any **fixable HIGH/CRITICAL** finding |
+| `security:trivy-image` (main) | the image just pushed: OS packages + shipped Node modules, secrets | any **fixable HIGH/CRITICAL** finding |
+
+A failed scan stops the pipeline before `deploy`, so a vulnerable build is never rolled out.
+Full reports (all severities) are job artifacts (`trivy-*.txt`). Findings also appear in the merge
+request (Code Quality widget). The container-scanning report shows in GitLab Ultimate.
+
+- Change the threshold with the CI/CD variable `TRIVY_GATE_SEVERITY` (default `HIGH,CRITICAL`).
+- Accept a reviewed risk: add its ID to `.trivyignore` with a reason and an expiry (`exp:YYYY-MM-DD`).
+- Run locally: `docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.76.1 fs . --scanners vuln,secret,misconfig`
+
+Hardening already in place: distroless non-root runtime image (no shell or package manager), and
+read-only root filesystems. Every capability is dropped and seccomp is set to `RuntimeDefault`
+for both the app and Postgres pods.
 
 ## Day-to-day
 
