@@ -1,1 +1,0 @@
-import{t as e}from"./framework~index~page~page~layout~page~app-page-cache-render~app-page-cache~app-route-handle~mmx89tzp-D4pOOWJs.js";import{t}from"./cab-app-bgFhVs_P.js";var n=e(),r=`force-dynamic`;function i(){return(0,n.jsx)(t,{})}export{i as default,r as dynamic};
