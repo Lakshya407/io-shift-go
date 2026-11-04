@@ -1,0 +1,18 @@
+# One-time, cluster-wide (NOT synced by the ShiftGo Argo CD app). Requires cert-manager:
+#   kubectl get crd clusterissuers.cert-manager.io     # installed?
+#   kubectl apply -f k8s/optional/cluster-issuer.yaml  # replace the email first
+# Skip this if your cluster already has a ClusterIssuer; then set its name in k8s/ingress.yaml.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: devops@infoorigin.com          # CHANGE: expiry notices go here
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

@@ -1,0 +1,30 @@
+# Public entry point: https://iocab.shiftgo.infoapps.io → Service shiftgo.
+# TLS certificate from cert-manager (ClusterIssuer "letsencrypt-prod", see k8s/optional/).
+# Without cert-manager, put a certificate into Secret "shiftgo-tls" yourself and remove the annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shiftgo
+  labels:
+    app.kubernetes.io/name: shiftgo
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - iocab.shiftgo.infoapps.io
+      secretName: shiftgo-tls
+  rules:
+    - host: iocab.shiftgo.infoapps.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shiftgo
+                port:
+                  name: http

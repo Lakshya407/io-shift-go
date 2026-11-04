@@ -1,0 +1,83 @@
+# In-cluster PostgreSQL 17 with a persistent volume. Credentials come from the shiftgo-env Secret.
+# For a managed database (AWS RDS), drop this file from kustomization.yaml and set DATABASE_URL.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shiftgo-postgres
+  labels:
+    app.kubernetes.io/name: shiftgo-postgres
+spec:
+  serviceName: shiftgo-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shiftgo-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shiftgo-postgres
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: shiftgo-env, key: POSTGRES_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: shiftgo-env, key: POSTGRES_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: shiftgo-env, key: POSTGRES_DB }
+            # Sub-directory: block volumes contain lost+found at their root.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # storageClassName: gp3    # uncomment to pin a storage class; default class otherwise
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shiftgo-postgres
+  labels:
+    app.kubernetes.io/name: shiftgo-postgres
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shiftgo-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

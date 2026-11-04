@@ -1,0 +1,206 @@
+# ShiftGo: GitLab CI (test → build → GitOps) with Argo CD as CD.
+#
+#   merge request / any branch:  typecheck + tests (SQLite and PostgreSQL)
+#   default branch (main):       … + build & push image → bump k8s/kustomization.yaml → Argo CD syncs
+#   manual job k8s:secrets:      writes the app's runtime settings (GitLab variables) into the cluster
+#
+# Setup, variables and one-time steps: docs/CI-CD.md
+# Runtime settings (SITE_URL, SETUP_TOKEN, AZURE_*…) are NOT used by test/build. Only k8s:secrets reads them.
+
+stages:
+  - test
+  - build
+  - deploy
+
+workflow:
+  rules:
+    # One pipeline per change: MR pipelines for MRs, branch pipelines otherwise.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  # ---- Image (defaults: this project's GitLab Container Registry) ----
+  # To use another registry (Harbor, ECR …) define REGISTRY, REGISTRY_USER, REGISTRY_PASSWORD
+  # and IMAGE_NAME as project CI/CD variables; they override these defaults.
+  REGISTRY: $CI_REGISTRY
+  REGISTRY_USER: $CI_REGISTRY_USER
+  REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  # ---- GitOps repo watched by Argo CD (default: k8s/ in this same project) ----
+  GITOPS_REPO: "${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+  GITOPS_BRANCH: $CI_DEFAULT_BRANCH
+  GITOPS_PATH: k8s
+  # ---- Kubernetes (k8s:secrets job only) ----
+  K8S_NAMESPACE: shiftgo
+  NODE_IMAGE: node:22-bookworm-slim
+
+# ---------------------------------------------------------------- test
+.node:
+  image: $NODE_IMAGE
+  stage: test
+  interruptible: true
+  cache:
+    key:
+      files: [package-lock.json]
+    paths: [.npm/]
+    policy: pull-push
+  variables:
+    npm_config_cache: "$CI_PROJECT_DIR/.npm"
+    npm_config_audit: "false"
+    npm_config_fund: "false"
+    NODE_OPTIONS: "--max-old-space-size=3072"
+  before_script:
+    - node -v && node -e "require('node:sqlite')"
+    - npm ci --prefer-offline --include=dev
+
+test:
+  extends: .node
+  script:
+    - npm run typecheck
+    - npm test   # API integration tests on SQLite + n8n workflow checks
+
+test:postgres:
+  extends: .node
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+  variables:
+    # Throw-away database inside the job; trust auth, so no password is involved.
+    POSTGRES_HOST_AUTH_METHOD: trust
+    POSTGRES_USER: shiftgo_ci
+    POSTGRES_DB: shiftgo_ci
+  script:
+    - export TEST_DATABASE_URL="postgres://shiftgo_ci@postgres:5432/shiftgo_ci"
+    - node tests/backend.integration.mjs
+
+# ---------------------------------------------------------------- build
+build:
+  stage: build
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+  before_script:
+    - until docker info >/dev/null 2>&1; do sleep 1; done
+    - echo "$REGISTRY_PASSWORD" | docker login --username "$REGISTRY_USER" --password-stdin "$REGISTRY"
+  script:
+    - docker buildx create --name ci --driver docker-container --use
+    - |
+      TAGS="--tag ${IMAGE_NAME}:${IMAGE_TAG}"
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then TAGS="$TAGS --tag ${IMAGE_NAME}:latest"; fi
+      if [ -n "$CI_COMMIT_TAG" ]; then TAGS="$TAGS --tag ${IMAGE_NAME}:${CI_COMMIT_TAG}"; fi
+      docker buildx build . \
+        --target runtime \
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --cache-from "type=registry,ref=${IMAGE_NAME}:buildcache" \
+        --cache-to "type=registry,ref=${IMAGE_NAME}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true" \
+        $TAGS \
+        --push
+    - echo "Pushed ${IMAGE_NAME}:${IMAGE_TAG}"
+
+# ---------------------------------------------------------------- deploy (GitOps)
+# Points k8s/kustomization.yaml at the new image and pushes the commit; Argo CD does the rollout.
+deploy:
+  stage: deploy
+  image: alpine:3.20
+  resource_group: production          # one deploy commit at a time
+  environment:
+    name: production
+    url: https://iocab.shiftgo.infoapps.io
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - apk add --no-cache git >/dev/null
+    - '[ -n "$GITOPS_TOKEN" ] || { echo "ERROR: set the GITOPS_TOKEN CI/CD variable (see docs/CI-CD.md)"; exit 1; }'
+    - git clone --quiet --depth 50 --branch "$GITOPS_BRANCH" "https://oauth2:${GITOPS_TOKEN}@${GITOPS_REPO}" gitops
+    - cd gitops
+    - git config user.name "${GITOPS_USER_NAME:-gitlab-ci}"
+    - git config user.email "${GITOPS_USER_EMAIL:-gitlab-ci@noreply.${CI_SERVER_HOST}}"
+    - |
+      file="$GITOPS_PATH/kustomization.yaml"
+      sed -i -E \
+        -e "s#^([[:space:]]*newName:).*#\1 ${IMAGE_NAME}#" \
+        -e "s#^([[:space:]]*newTag:).*#\1 \"${IMAGE_TAG}\"#" "$file"
+      grep -E "newName|newTag" "$file"
+      git add "$file"
+      if git diff --cached --quiet; then echo "Manifests already at ${IMAGE_TAG}"; exit 0; fi
+      git commit --quiet -m "deploy: shiftgo ${IMAGE_TAG} [skip ci]" -m "Pipeline: ${CI_PIPELINE_URL}"
+      for attempt in 1 2 3 4 5; do
+        if git push --quiet -o ci.skip origin "HEAD:${GITOPS_BRANCH}"; then echo "Deployed ${IMAGE_TAG}; Argo CD will sync."; exit 0; fi
+        echo "Push rejected (attempt $attempt), rebasing…"; git pull --quiet --rebase origin "$GITOPS_BRANCH"
+      done
+      exit 1
+
+# Manual: copies the runtime settings from GitLab CI/CD variables into the cluster as the
+# Secret "shiftgo-env" (+ image pull secret), then restarts the app. Run it after the first
+# deploy and whenever a setting changes. Needs KUBE_CONFIG (File variable). Without it, create
+# the Secret by hand (docs/CI-CD.md).
+k8s:secrets:
+  stage: deploy
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $KUBE_CONFIG
+      when: manual
+  allow_failure: true
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - apk add --no-cache curl >/dev/null
+    - |
+      set -eu
+      arch=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+      curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${arch}/kubectl"
+      chmod +x /usr/local/bin/kubectl
+      export KUBECONFIG="$KUBE_CONFIG"
+
+      # Required settings
+      missing=""
+      for k in SITE_URL SETUP_TOKEN; do eval "v=\${$k:-}"; [ -n "$v" ] || missing="$missing $k"; done
+      if [ -z "${DATABASE_URL:-}" ] && [ -z "${POSTGRES_PASSWORD:-}" ]; then missing="$missing POSTGRES_PASSWORD(or DATABASE_URL)"; fi
+      if [ -n "$missing" ]; then echo "ERROR: missing CI/CD variables:$missing"; exit 1; fi
+
+      POSTGRES_USER="${POSTGRES_USER:-shiftgo}"
+      POSTGRES_DB="${POSTGRES_DB:-shiftgo}"
+      # In-cluster Postgres (k8s/postgres.yaml) unless an external DATABASE_URL is given.
+      DATABASE_URL="${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@shiftgo-postgres:5432/${POSTGRES_DB}}"
+
+      umask 077; : > /tmp/shiftgo.env
+      for k in SITE_URL SETUP_TOKEN POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL DATABASE_SSL DATABASE_POOL_MAX \
+               AZURE_AD_TENANT_ID AZURE_AD_CLIENT_ID AZURE_AD_CLIENT_SECRET AZURE_AD_REDIRECT_URI \
+               AUTOMATION_API_KEY N8N_WEBHOOK_URL N8N_WEBHOOK_SECRET; do
+        eval "v=\${$k:-}"
+        if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v" >> /tmp/shiftgo.env; echo "  set $k"; fi
+      done
+
+      kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+      kubectl -n "$K8S_NAMESPACE" create secret generic shiftgo-env --from-env-file=/tmp/shiftgo.env \
+        --dry-run=client -o yaml | kubectl apply -f -
+      rm -f /tmp/shiftgo.env
+
+      # Image pull secret: a deploy token named "gitlab-deploy-token" (read_registry) is exposed
+      # automatically as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD; PULL_USER / PULL_PASSWORD override it.
+      pull_user="${PULL_USER:-${CI_DEPLOY_USER:-}}"; pull_pass="${PULL_PASSWORD:-${CI_DEPLOY_PASSWORD:-}}"
+      if [ -n "$pull_user" ] && [ -n "$pull_pass" ]; then
+        kubectl -n "$K8S_NAMESPACE" create secret docker-registry gitlab-registry \
+          --docker-server="$REGISTRY" --docker-username="$pull_user" --docker-password="$pull_pass" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      else
+        echo "WARNING: no registry pull credentials (deploy token 'gitlab-deploy-token' or PULL_USER/PULL_PASSWORD)."
+      fi
+
+      kubectl -n "$K8S_NAMESPACE" rollout restart deployment/shiftgo 2>/dev/null || echo "Deployment not created yet (Argo CD will start it)."

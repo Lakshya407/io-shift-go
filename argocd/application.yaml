@@ -1,0 +1,31 @@
+# Argo CD application for ShiftGo. Apply once:  kubectl apply -n argocd -f argocd/application.yaml
+# Argo CD needs read access to the repo: Settings → Repositories → Connect repo (HTTPS),
+# with a GitLab deploy token / project access token that has read_repository.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shiftgo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://iogitlab.infoorigin.com/io-cloud/io-shift-go.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shiftgo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

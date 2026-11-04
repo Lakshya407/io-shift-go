@@ -79,6 +79,15 @@ npm run build
 npm run start        # serves dist/ with wrangler on http://127.0.0.1:8787
 ```
 
+## Run with Docker
+
+```bash
+cp .env.example .env          # SITE_URL, SETUP_TOKEN, POSTGRES_PASSWORD, Azure SSO …
+docker compose up -d --build  # http://localhost:8088
+```
+
+PostgreSQL + app (Node.js) behind Nginx; add `--profile automation` for a local n8n. See [docs/DEPLOY-DOCKER.md](docs/DEPLOY-DOCKER.md).
+
 ## Deploy to AWS (EC2, CI/CD with CodeCommit/CodeBuild/CodeDeploy)
 
 See [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md). `npm run build:node` produces a self-contained Node.js server in `dist/standalone` (SQLite file database); `buildspec.yml`, `appspec.yml` and `deploy/` run the pipeline.

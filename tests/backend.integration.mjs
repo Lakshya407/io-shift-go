@@ -13,10 +13,20 @@ const database=new DatabaseSync(':memory:');database.exec('PRAGMA foreign_keys=O
 for(const file of (await readdir(resolve('drizzle'))).filter(x=>x.endsWith('.sql')).sort())database.exec(await readFile(resolve('drizzle',file),'utf8'));
 class Statement {constructor(sql,args=[]){this.sql=sql;this.args=args;}bind(...args){return new Statement(this.sql,args);}async first(){return database.prepare(this.sql).get(...this.args)||null;}async all(){const results=database.prepare(this.sql).all(...this.args);return {results,success:true,meta:{changes:database.prepare('SELECT changes() n').get().n}};}async run(){const result=database.prepare(this.sql).run(...this.args);return {success:true,meta:{changes:Number(result.changes)}};}}
 const d1={prepare(sql){return new Statement(sql);},async batch(statements){database.exec('BEGIN');try{const results=[];for(const statement of statements)results.push(await statement.run());database.exec('COMMIT');return results;}catch(error){database.exec('ROLLBACK');throw error;}}};
+const pgUrl=process.env.TEST_DATABASE_URL;let pgPool=null;
 globalThis.__nightshiftTestEnv={DB:d1,SETUP_TOKEN:'test-setup-key-0123456789',SITE_URL:'https://nightshift.example.com'};
 const folder=await mkdtemp(join(tmpdir(),'nightshift-api-test-'));
 try {
  for(const file of (await readdir(resolve('lib'))).filter(x=>x.endsWith('.ts'))){let source=await readFile(resolve('lib',file),'utf8');source=source.replace("import { env, waitUntil } from 'cloudflare:workers';","const env = globalThis.__nightshiftTestEnv; const waitUntil = (promise) => void promise;");let output=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;output=output.replace(/from '(\.\/[^']+)'/g,"from '$1.mjs'");await writeFile(join(folder,file.replace(/\.ts$/,'.mjs')),output);}
+ if(pgUrl){// Same suite against PostgreSQL (TEST_DATABASE_URL): fresh schema, adapter from lib/postgres.ts.
+  const {default:pg}=await import('pg');const {PostgresD1,configurePgTypes,migratePostgres}=await import(pathToFileURL(join(folder,'postgres.mjs')).href);
+  configurePgTypes(pg.types);pgPool=new pg.Pool({connectionString:pgUrl,max:4});
+  await pgPool.query('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public');
+  const files={};for(const file of (await readdir(resolve('db/migrations-pg'))).filter(x=>x.endsWith('.sql')))files[file]=await readFile(resolve('db/migrations-pg',file),'utf8');
+  await migratePostgres(pgPool,files,()=>{});globalThis.__nightshiftTestEnv.DB=new PostgresD1(pgPool);
+ }
+ const sqlGet=async(sql,...args)=>await globalThis.__nightshiftTestEnv.DB.prepare(sql).bind(...args).first();
+ const sqlRun=async(sql,...args)=>await globalThis.__nightshiftTestEnv.DB.prepare(sql).bind(...args).run();
  const {dispatch}=await import(pathToFileURL(join(folder,'api.mjs')).href);
  const origin='https://nightshift.example.com';
  async function call(path,{method='GET',body,cookie,owner=false,automationKey,csrf=true}={}){const headers={};if(body!==undefined)headers['content-type']='application/json';if(method!=='GET'&&csrf)headers.origin=origin;if(cookie)headers.cookie=cookie;if(owner){headers['oai-authenticated-user-id']='trusted-owner';headers['oai-authenticated-user-email']='owner@example.com';}if(automationKey)headers['X-Automation-Key']=automationKey;const response=await dispatch(new Request(origin+'/api/'+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}));const raw=await response.text();let data;try{data=JSON.parse(raw);}catch{data=raw;}return {status:response.status,data,cookie:response.headers.get('set-cookie')?.split(';')[0],headers:response.headers.get('set-cookie')||''};}
@@ -37,19 +47,19 @@ try {
  check((await call('dashboard',{cookie:employee})).status===403,'Employee cannot access admin.');
  const tripId=crypto.randomUUID(),boardKey=crypto.randomUUID();const boardBody={eventId:boardKey,type:'board',direction:'office_to_home',tripId,location:{status:'denied'},deviceTime:'2026-10-29T19:30:00Z'};
  const board=await call('trips/events',{method:'POST',cookie:employee,body:boardBody});check(board.status===201&&board.data.trip.id===tripId,'Offline client trip ID honored.');check(board.data.event.location.status==='denied','Permission denial does not block event.');
- const duplicate=await call('trips/events',{method:'POST',cookie:employee,body:boardBody});check(duplicate.data.duplicate===true,'Retry returns original persisted event.');check(database.prepare('SELECT COUNT(*) n FROM events').get().n===1,'Retry does not duplicate audit event.');check(database.prepare('SELECT COUNT(*) n FROM notifications').get().n===2,'Retry does not duplicate channel jobs.');
+ const duplicate=await call('trips/events',{method:'POST',cookie:employee,body:boardBody});check(duplicate.data.duplicate===true,'Retry returns original persisted event.');check((await sqlGet('SELECT COUNT(*) n FROM events')).n===1,'Retry does not duplicate audit event.');check((await sqlGet('SELECT COUNT(*) n FROM notifications')).n===2,'Retry does not duplicate channel jobs.');
  check((await call('trips/events',{method:'POST',cookie:employee,body:{...boardBody,eventId:crypto.randomUUID(),tripId:crypto.randomUUID()}})).status===409,'One active trip enforced.');
  const arrived=await call('trips/events',{method:'POST',cookie:employee,body:{eventId:crypto.randomUUID(),type:'arrive',tripId,location:{status:'available',lat:21.46,lng:80.19,accuracy:15}}});check(arrived.status===201&&arrived.data.trip.status==='completed','Arrival completes active trip.');
  const sosKey=crypto.randomUUID();const sos=await call('trips/events',{method:'POST',cookie:employee,body:{eventId:sosKey,type:'sos',tripId,location:{status:'pending'}}});check(sos.status===201&&sos.data.sos.tripId===null,'Urgent SOS ignores stale trip id and records without active trip.');
  const loc=await call('trips/location',{method:'POST',cookie:employee,body:{eventId:sosKey,location:{status:'available',lat:21.46,lng:80.19,accuracy:20}}});check(loc.status===200,'Late SOS GPS recorded separately.');
- check(database.prepare("SELECT location FROM events WHERE event_id=?").get(sosKey).location.includes('pending'),'Original SOS event remains immutable.');
+ check((await sqlGet("SELECT location FROM events WHERE event_id=?",sosKey)).location.includes('pending'),'Original SOS event remains immutable.');
  const token=await call('admin/automation/token',{method:'POST',cookie:admin,body:{}});check(token.status===200&&token.data.token.length===64,'Admin issues one-time automation secret.');
  check((await call('automation/jobs/claim',{method:'POST',body:{limit:20},csrf:false})).status===401,'Job lease requires automation credential.');
  const key=token.data.token;const jobs=await call('automation/jobs/claim',{method:'POST',body:{limit:20,workerId:'test'},automationKey:key,csrf:false});check(jobs.status===200&&jobs.data.jobs.length===8,'All independent channel jobs leased.');
  check((await call('automation/jobs/claim',{method:'POST',body:{limit:20},automationKey:key,csrf:false})).data.jobs.length===0,'Concurrent claimant cannot take live leases.');
  const job=jobs.data.jobs[0];const fail={leaseToken:job.leaseToken,status:'failed',error:'Simulated provider timeout'};
  const receipt=await call('automation/jobs/'+job.id+'/receipt',{method:'POST',body:fail,automationKey:key,csrf:false});check(receipt.status===200&&receipt.data.status==='pending','Failed provider schedules retry.');
- const receipt2=await call('automation/jobs/'+job.id+'/receipt',{method:'POST',body:fail,automationKey:key,csrf:false});check(receipt2.status===200&&receipt2.data.duplicate,'Failed receipt retry is idempotent.');check(database.prepare('SELECT COUNT(*) n FROM notification_attempts WHERE notification_id=?').get(job.id).n===1,'One receipt per lease.');
+ const receipt2=await call('automation/jobs/'+job.id+'/receipt',{method:'POST',body:fail,automationKey:key,csrf:false});check(receipt2.status===200&&receipt2.data.duplicate,'Failed receipt retry is idempotent.');check((await sqlGet('SELECT COUNT(*) n FROM notification_attempts WHERE notification_id=?',job.id)).n===1,'One receipt per lease.');
  const second=jobs.data.jobs[1];check((await call('automation/jobs/'+second.id+'/receipt',{method:'POST',body:{leaseToken:'invalid',status:'sent'},automationKey:key,csrf:false})).status===409,'Stale/invalid lease cannot claim success.');
  check((await call('automation/jobs/'+second.id+'/receipt',{method:'POST',body:{leaseToken:second.leaseToken,status:'sent',providerId:'provider-123'},automationKey:key,csrf:false})).status===200,'Provider accepted receipt saved.');
  const acknowledged=await call('admin/sos/'+sos.data.sos.id,{method:'POST',cookie:admin,body:{action:'acknowledge',note:'Calling employee'}});check(acknowledged.status===200&&acknowledged.data.sos.status==='acknowledged','Authenticated admin acknowledges SOS.');
@@ -59,14 +69,14 @@ try {
  await call('admin/settings',{method:'PUT',cookie:admin,body:{reportHour:0,reportMinute:0,shiftCutoffHour:cutoff}});
  const targetEnd=Date.UTC(local.getUTCFullYear(),local.getUTCMonth(),local.getUTCDate(),cutoff)-offset;
  const oldEnd=targetEnd-3*86400000;
- database.prepare('INSERT INTO reports (id,period_start,period_end,generated_at,trip_count,completed_count,active_count,sos_count) VALUES (?,?,?,?,0,0,0,0)').run('old-report',new Date(oldEnd-86400000).toISOString(),new Date(oldEnd).toISOString(),new Date().toISOString());
+ await sqlRun('INSERT INTO reports (id,period_start,period_end,generated_at,trip_count,completed_count,active_count,sos_count) VALUES (?,?,?,?,0,0,0,0)','old-report',new Date(oldEnd-86400000).toISOString(),new Date(oldEnd).toISOString(),new Date().toISOString());
  const tick=await call('automation/tick',{method:'POST',body:{},automationKey:key,csrf:false});check(tick.status===200&&tick.data.reportsCreated===3,'Daily tick catches up missed periods.');
  check((await call('automation/tick',{method:'POST',body:{},automationKey:key,csrf:false})).data.reportsCreated===0,'Repeated schedule tick does not duplicate reports.');
  // Explicit report windows include all incidents, even when no journey exists.
- database.prepare('INSERT INTO reports (id,period_start,period_end,generated_at,trip_count,completed_count,active_count,sos_count) VALUES (?,?,?,?,0,0,0,1)').run('current-test-window',new Date(Date.now()-60000).toISOString(),new Date(Date.now()+60000).toISOString(),new Date().toISOString());
+ await sqlRun('INSERT INTO reports (id,period_start,period_end,generated_at,trip_count,completed_count,active_count,sos_count) VALUES (?,?,?,?,0,0,0,1)','current-test-window',new Date(Date.now()-60000).toISOString(),new Date(Date.now()+60000).toISOString(),new Date().toISOString());
  check((await call('reports.csv?reportId=current-test-window',{cookie:admin})).data.includes(sos.data.sos.id),'Saved-period export includes standalone SOS.');
  // Unknown or acknowledged SOS reminders cannot be dispatched.
- database.prepare("UPDATE sos SET next_escalation_at=? WHERE id=?").run(new Date(Date.now()-60000).toISOString(),sos.data.sos.id);
+ await sqlRun("UPDATE sos SET next_escalation_at=? WHERE id=?",new Date(Date.now()-60000).toISOString(),sos.data.sos.id);
  check((await call('automation/tick',{method:'POST',body:{},automationKey:key,csrf:false})).data.escalations===0,'Acknowledged SOS does not create reminders.');
  const deactivated=await call('admin/employees/'+created.data.employee.id,{method:'PATCH',cookie:admin,body:{active:false}});check(deactivated.status===200&&(await call('employee',{cookie:employee})).status===401,'Employee deactivation revokes sessions.');
  // ---- Locations ----
@@ -92,6 +102,6 @@ try {
  check((await call('admin/employees/'+setup.data.me.id,{method:'PATCH',cookie:admin,body:{role:'employee'}})).status===400,'Last administrator cannot be demoted.');
  check((await call('admin/employees/'+setup.data.me.id,{method:'DELETE',cookie:admin})).status===400,'Admin cannot delete self.');
  const del=await call('admin/employees/'+supUser.data.employee.id,{method:'DELETE',cookie:admin});check(del.status===200&&del.data.removed==='deleted'&&(await call('auth/login',{method:'POST',body:{login:'S001',password:'Supervisor-pass-123'}})).status===401,'User without history is deleted and cannot sign in.');
- const del2=await call('admin/employees/'+created.data.employee.id,{method:'DELETE',cookie:admin});check(del2.data.removed==='archived'&&database.prepare('SELECT COUNT(*) n FROM trips WHERE employee_id=?').get(created.data.employee.id).n>0,'User with journeys is archived; history kept.');
- console.log(`PASS: ${checks} API integration assertions; auth, idempotency, SOS, leasing, retries, CSV, deactivation, locations and RBAC.`);
-}finally{database.close();await rm(folder,{recursive:true,force:true});delete globalThis.__nightshiftTestEnv;}
+ const del2=await call('admin/employees/'+created.data.employee.id,{method:'DELETE',cookie:admin});check(del2.data.removed==='archived'&&(await sqlGet('SELECT COUNT(*) n FROM trips WHERE employee_id=?',created.data.employee.id)).n>0,'User with journeys is archived; history kept.');
+ console.log(`PASS (${pgUrl?'PostgreSQL':'SQLite'}): ${checks} API integration assertions; auth, idempotency, SOS, leasing, retries, CSV, deactivation, locations and RBAC.`);
+}finally{database.close();if(pgPool)await pgPool.end();await rm(folder,{recursive:true,force:true});delete globalThis.__nightshiftTestEnv;}

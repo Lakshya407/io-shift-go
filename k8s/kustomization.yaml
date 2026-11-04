@@ -1,0 +1,27 @@
+# ShiftGo: Kubernetes manifests synced by Argo CD (argocd/application.yaml).
+# The CI "deploy" job rewrites newName/newTag below on every main-branch pipeline.
+#
+# Not in Git (created by the CI job "k8s:secrets", or by hand, see docs/CI-CD.md):
+#   Secret shiftgo-env      runtime settings (SITE_URL, SETUP_TOKEN, DATABASE_URL, AZURE_AD_* …)
+#   Secret gitlab-registry  image pull credentials
+#
+# External database (e.g. AWS RDS): remove postgres.yaml below and set DATABASE_URL.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shiftgo
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: shiftgo
+    includeSelectors: false
+
+resources:
+  - postgres.yaml
+  - app.yaml
+  - ingress.yaml
+
+images:
+  - name: shiftgo-cab
+    newName: iogitlab.infoorigin.com:5050/io-cloud/io-shift-go
+    newTag: "latest"

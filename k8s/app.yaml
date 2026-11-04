@@ -1,0 +1,96 @@
+# ShiftGo app: one replica (the every-minute SOS/report tick runs inside the process).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shiftgo
+  labels:
+    app.kubernetes.io/name: shiftgo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate             # never two app pods (and two maintenance ticks) at once
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shiftgo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shiftgo
+      annotations:
+        # Change to force a restart after editing the shiftgo-env Secret by hand.
+        shiftgo/config-revision: "1"
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000          # "node" user of the image
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: shiftgo
+          image: shiftgo-cab      # replaced by kustomization.yaml (newName/newTag)
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: shiftgo-env
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: "3000"
+            # The pod is only reachable through the ingress controller, which sets these headers.
+            - name: VINEXT_TRUST_PROXY
+              value: "1"
+            # Fail (pod not ready) instead of falling back to SQLite if DATABASE_URL is missing.
+            - name: SHIFTGO_REQUIRE_POSTGRES
+              value: "1"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shiftgo
+  labels:
+    app.kubernetes.io/name: shiftgo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shiftgo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

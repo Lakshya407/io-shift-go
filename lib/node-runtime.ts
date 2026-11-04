@@ -4,7 +4,9 @@
 // Cloudflare build never includes it.
 //
 // It provides:
-//   env.DB      – a D1-compatible adapter over a local SQLite file (node:sqlite)
+//   env.DB      – a D1-compatible database adapter:
+//                   DATABASE_URL set  → PostgreSQL (lib/postgres.ts, migrations in db/migrations-pg)
+//                   otherwise         → a local SQLite file at DATABASE_PATH (node:sqlite)
 //   env.<NAME>  – values from process.env (SETUP_TOKEN, SITE_URL, …)
 //   waitUntil   – fire-and-forget background work with error logging
 // and, once the database is first opened, it applies pending migrations and
@@ -12,10 +14,17 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import pg from 'pg';
+import { PostgresD1, configurePgTypes, migratePostgres } from './postgres';
 
 // Same migration files and tracking table as worker/index.ts, so a database
 // can move between the Cloudflare and Node builds.
 const migrationFiles = import.meta.glob('../drizzle/*.sql', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+const postgresMigrations = import.meta.glob('../db/migrations-pg/*.sql', {
   query: '?raw',
   import: 'default',
   eager: true,
@@ -136,19 +145,60 @@ function startMaintenance() {
   setInterval(run, 60_000).unref();
 }
 
-type Global = typeof globalThis & { __shiftgoDb?: SqliteD1 };
+type Global = typeof globalThis & { __shiftgoDb?: SqliteD1 | PostgresD1 };
 
-function database(): SqliteD1 {
-  const g = globalThis as Global;
-  if (g.__shiftgoDb) return g.__shiftgoDb;
+function postgresDatabase(url: string): PostgresD1 {
+  configurePgTypes(pg.types);
+  const ssl = process.env.DATABASE_SSL;
+  const pool = new pg.Pool({
+    connectionString: url,
+    max: Number(process.env.DATABASE_POOL_MAX || 10),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+    // DATABASE_SSL=require → TLS with certificate verification; =no-verify → TLS without it
+    // (e.g. managed databases with a private CA). Unset → as given in DATABASE_URL.
+    ...(ssl === 'require' ? { ssl: { rejectUnauthorized: true } } : ssl === 'no-verify' ? { ssl: { rejectUnauthorized: false } } : {}),
+  });
+  pool.on('error', (e) => console.error('ShiftGo: idle PostgreSQL connection error', e.message));
+  const ready = migratePostgres(pool, postgresMigrations).then(
+    () => {
+      console.log('ShiftGo: PostgreSQL database ready');
+      startMaintenance();
+    },
+    (error) => {
+      // Let the next request retry instead of keeping a broken adapter forever.
+      console.error('ShiftGo: PostgreSQL migration/connection failed', error);
+      delete (globalThis as Global).__shiftgoDb;
+      void pool.end().catch(() => {});
+      throw error;
+    },
+  );
+  ready.catch(() => {});
+  return new PostgresD1(pool, ready);
+}
+
+function sqliteDatabase(): SqliteD1 {
   const file = resolve(process.env.DATABASE_PATH || 'data/shiftgo.db');
   mkdirSync(dirname(file), { recursive: true });
   const raw = new DatabaseSync(file);
   raw.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;');
   migrate(raw);
-  g.__shiftgoDb = new SqliteD1(raw);
-  console.log(`ShiftGo: database ready at ${file}`);
+  const db = new SqliteD1(raw);
+  console.log(`ShiftGo: SQLite database ready at ${file}`);
   startMaintenance();
+  return db;
+}
+
+function database(): SqliteD1 | PostgresD1 {
+  const g = globalThis as Global;
+  if (g.__shiftgoDb) return g.__shiftgoDb;
+  const url = process.env.DATABASE_URL?.trim();
+  // Kubernetes sets SHIFTGO_REQUIRE_POSTGRES=1: never fall back to a SQLite file inside an
+  // ephemeral container. /api/health then fails, so the pod is never marked ready.
+  if (!url && process.env.SHIFTGO_REQUIRE_POSTGRES === '1') {
+    throw new Error('DATABASE_URL is not set (required because SHIFTGO_REQUIRE_POSTGRES=1).');
+  }
+  g.__shiftgoDb = url ? postgresDatabase(url) : sqliteDatabase();
   return g.__shiftgoDb;
 }
 
