@@ -1,0 +1,73 @@
+# ShiftGo cab app: Docker Compose stack.
+#
+#   docker compose up -d --build                       app + Nginx  → http://localhost:8080
+#   docker compose --profile automation up -d --build  … + n8n      → http://localhost:5678
+#
+# Configuration and secrets: copy .env.example to .env and fill it in
+# (SETUP_TOKEN, SITE_URL, optional n8n / Azure AD values). .env is git-ignored.
+#
+# SQLite runs in a single app container. Do not scale "app" beyond 1 replica.
+
+name: shiftgo
+
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    image: shiftgo-cab:latest
+    restart: unless-stopped
+    init: true                    # forwards SIGTERM so `docker compose stop` is quick
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATABASE_PATH: /data/shiftgo.db
+      # Safe only because the app port is not published: Nginx is the sole client.
+      VINEXT_TRUST_PROXY: "1"
+      SITE_URL: ${SITE_URL:-http://localhost:8080}
+    volumes:
+      - shiftgo-data:/data
+    expose:
+      - "3000"
+    stop_grace_period: 20s
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${SHIFTGO_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # Optional: self-hosted n8n for Teams / email delivery (automations/README.md).
+  # Import automations/*.json, set each workflow's baseUrl to http://app:3000,
+  # and in .env set N8N_WEBHOOK_URL=http://n8n:5678/webhook/cab-notification-wakeup.
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
+    profiles: ["automation"]
+    restart: unless-stopped
+    environment:
+      GENERIC_TIMEZONE: ${TZ:-Asia/Kolkata}
+      TZ: ${TZ:-Asia/Kolkata}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${N8N_PUBLIC_URL:-http://localhost:5678/}
+      # Required to log in over plain http://localhost; remove once n8n is behind HTTPS.
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+    ports:
+      - "${N8N_HTTP_PORT:-5678}:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+
+volumes:
+  shiftgo-data:
+  n8n-data:
