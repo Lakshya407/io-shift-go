@@ -1,0 +1,42 @@
+# Keep the build context small and free of local state and secrets.
+# Dependencies are installed inside the image from package-lock.json.
+
+# VCS and nested repositories
+.git
+**/.git
+io-shift-go/
+
+# Dependencies and build output (rebuilt inside the image)
+node_modules/
+dist/
+release/
+.next/
+.vinext/
+out/
+coverage/
+*.tsbuildinfo
+
+# Local runtime state (Cloudflare dev, local SQLite data)
+.wrangler/
+.sites-runtime/
+data/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+
+# Docker files themselves (not needed inside the image)
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+npm-debug.log*
