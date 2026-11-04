@@ -1,0 +1,28 @@
+# systemd unit for ShiftGo. Installed to /etc/systemd/system/ by deploy/after-install.sh.
+[Unit]
+Description=ShiftGo cab safety app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shiftgo
+Group=shiftgo
+EnvironmentFile=/etc/shiftgo.env
+Environment=NODE_ENV=production
+WorkingDirectory=/opt/shiftgo/current
+ExecStart=/usr/bin/env node /opt/shiftgo/current/server.js
+ExecStartPost=/opt/shiftgo/bin/warmup.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+
+# Hardening: the app can only write to its data folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/shiftgo
+
+[Install]
+WantedBy=multi-user.target

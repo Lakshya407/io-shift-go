@@ -1,0 +1,152 @@
+{
+  "name": "ShiftGo Cab \u00b7 SOS Escalation and Daily Reports",
+  "nodes": [
+    {
+      "id": "91415022-858d-5e6d-81c7-05d442e03beb",
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -420,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "00d1e0fc-848e-5f19-ae65-ff2aefef2747",
+      "name": "Manual maintenance",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -420,
+        180
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "6b6371d4-0c80-5353-9701-4c59c4629f4a",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Non-secret deployment settings. Never paste credentials here.\nconst baseUrl = 'https://nightshift-cab-care.noblebuddy257.chatgpt.site';\nconst fromEmail = 'cab-alerts@YOUR-COMPANY.example';\nif (!/^https:\\/\\//.test(baseUrl) || /YOUR-CAB-APP/.test(baseUrl)) {\n  throw new Error('Set the HTTPS app URL in Configuration before activating this workflow.');\n}\nreturn [{json: {baseUrl: baseUrl.replace(/\\/$/, ''), fromEmail, limit: 5}}];"
+      }
+    },
+    {
+      "id": "e63a32cc-9155-5673-b999-fdfb110034fb",
+      "name": "Generate due reminders and reports",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.baseUrl + '/api/automation/tick' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workerId:'n8n-maintenance-' + $execution.id}) }}",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CONFIGURE_CAB_APP_CUSTOM_AUTH",
+          "name": "Cab app automation API"
+        }
+      }
+    },
+    {
+      "id": "99dcaeec-a54c-500a-9bae-73c602f59091",
+      "name": "How timing works",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -180,
+        -360
+      ],
+      "parameters": {
+        "content": "## App-owned timing\nThe app decides which SOS reminders and daily reports are due, using the admin's settings and Asia/Kolkata by default. Tick is idempotent.\n\nThis workflow queues messages; the Notification Dispatcher sends them. No AI is used for routing or emergency decisions.\n\nConfigure the same app URL and Custom Auth credential as the dispatcher, then publish.",
+        "height": 260,
+        "width": 560
+      }
+    }
+  ],
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual maintenance": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Generate due reminders and reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "executionTimeout": 240
+  },
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

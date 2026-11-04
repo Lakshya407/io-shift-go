@@ -1,0 +1,1 @@
+import{t as e}from"./framework~index~page~page~layout~page~app-page-cache-render~app-page-cache~app-route-handle~mmx89tzp-D4pOOWJs.js";import{t}from"./cab-app-bgFhVs_P.js";var n=e(),r=`force-dynamic`,i={title:`ShiftGo · My ride`};function a(){return(0,n.jsx)(t,{area:`employee`})}export{a as default,r as dynamic,i as metadata};

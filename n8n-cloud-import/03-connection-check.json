@@ -1,0 +1,117 @@
+{
+  "name": "ShiftGo \u00b7 Connection Check (no messages)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "15ef408b-1f88-4c66-900e-61ee5a55629c",
+      "name": "Manual connection check",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -480,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "7b47ffeb-8bad-4df0-afc7-1af679061564",
+      "name": "Check app authentication",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://nightshift-cab-care.noblebuddy257.chatgpt.site/api/automation/tick",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json",
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CONFIGURE_CAB_APP_CUSTOM_AUTH",
+          "name": "Cab app automation API"
+        }
+      }
+    },
+    {
+      "id": "5b9dd21d-690d-436c-ab5f-fe64bfa73bfd",
+      "name": "Verify expected response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "if ($json.statusCode !== 405 || $json.body?.error !== 'Use POST for automation actions.') { throw new Error('Connection not verified. Check both the app API key and private Site service-access header. Expected authenticated HTTP 405.'); }\nreturn {json:{connected:true,checkedAt:new Date().toISOString(),message:'Both authentication layers verified. No jobs claimed, no reports generated, no messages sent.'}};"
+      }
+    },
+    {
+      "id": "f69e3f91-c257-4368-b481-1834789bba4e",
+      "name": "Why HTTP 405 is success here",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -470,
+        -270
+      ],
+      "parameters": {
+        "content": "## A connection test that cannot send messages\nThis performs GET on a POST-only automation endpoint. The app checks both authentication layers before returning the expected 405 error.\n\nBind the Custom Auth credential, then execute manually. A successful result confirms access without claiming jobs, creating reports, or sending Teams/email notifications.",
+        "height": 230,
+        "width": 620
+      }
+    }
+  ],
+  "connections": {
+    "Manual connection check": {
+      "main": [
+        [
+          {
+            "node": "Check app authentication",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check app authentication": {
+      "main": [
+        [
+          {
+            "node": "Verify expected response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "executionTimeout": 60,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": []
+}
